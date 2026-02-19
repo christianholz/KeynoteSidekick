@@ -168,7 +168,9 @@ final class LLMPlanner: @unchecked Sendable {
         No markdown. No extra text.
         On cycle > 1 after successful execution feedback, return status="complete" unless there is a specific unmet objective.
         Do not expand scope beyond the user objective. Do not invent extra examples/slides.
-        If the objective asks to add/insert/preface slides, include explicit structural operations (`ensureSlide` and/or `moveSlide`) instead of text-only edits.
+        Use stable slide keys from payload.presentationDOM; do not use numeric slide aliases (slide_1, slide_2, etc.) or absolute slide indices for targeting.
+        Do not invent slide keys for newly created slides; KeynoteSidekick owns slide-key assignment for created slides.
+        If the objective asks to add/insert/preface/reorder slides, include explicit structural operations (`ensureSlide`, `moveBefore`, `moveAfter`) instead of text-only edits.
         Keep plans minimal: avoid redundant operations, and prefer `ensureSlide.args.title` over a separate title `ensureTextBox` when creating a slide.
 
         \(requestJSON)
@@ -514,7 +516,10 @@ final class LLMPlanner: @unchecked Sendable {
         persistentPrompt: String,
         executionFeedback: String
     ) -> [String: Any] {
-        [
+        let activeSlideKey = focusContext.currentSlideIndex
+            .flatMap { domSnapshot.slide(at: $0)?.slideKey }
+            ?? "current_slide"
+        return [
             "protocolVersion": planningProtocolVersion,
             "type": planningRequestType,
             "payload": [
@@ -526,9 +531,9 @@ final class LLMPlanner: @unchecked Sendable {
                 "persistentSystemPrompt": persistentPrompt,
                 "executionFeedback": executionFeedback,
                 "activeSlide": [
-                    "index": focusContext.currentSlideIndex as Any,
                     "title": focusContext.currentSlideTitle,
-                    "slideKeyAlias": "current_slide"
+                    "slideKeyAlias": "current_slide",
+                    "slideKey": activeSlideKey
                 ],
                 "selectedElements": focusContext.selectedItems.enumerated().map { offset, item in
                     [
@@ -553,7 +558,8 @@ final class LLMPlanner: @unchecked Sendable {
                     "duplicateSlide",
                     "deleteSlide",
                     "hideSlide",
-                    "moveSlide",
+                    "moveBefore",
+                    "moveAfter",
                     "ensureTextBox",
                     "ensureBullets",
                     "ensureImage",
@@ -573,9 +579,12 @@ final class LLMPlanner: @unchecked Sendable {
                 ],
                 "layoutPreference": "Title & Bullets for content slides with bullets",
                 "bulletTextRule": "Provide clean bullet item text without literal bullet symbols",
-                "deicticReferenceRule": "When user says 'this slide', target slideKey 'current_slide'. When user says 'a slide after this', target slideKey 'slide_after_current' (or use ensureSlide.args.index = activeSlide.index + 1). When user refers to selected object, use payload.selectedElements.name, and if name is empty use payload.selectedElements.alias with useSelection=true.",
-                "selectorRule": "For ambiguous targets, use resolveTarget with args.selector fields: role, type, textEquals, textContains, textPrefix, index, isSelected, boundsNear. For element resolution, include target.elementName and reuse it in follow-up ops. For slide resolution, set selector.type='slide' and use target.slideKey alias in follow-up ops.",
-                "domHandleRule": "Prefer payload.presentationDOM canonical handles: slideKey for slides, and role-backed element handles (title/body/text) when available. If title text is ambiguous across slides, include selector.index or exact slideKey from presentationDOM instead of fuzzy title matching.",
+                "stableSlideKeyRule": "Never target slides by numeric aliases (e.g. slide_1) or absolute indices. Use payload.presentationDOM slides[*].slideKey and deictic aliases only.",
+                "slideKeyOwnershipRule": "Do not invent slide keys for new slides. For newly created slides, KeynoteSidekick will assign/manage slide keys.",
+                "deicticReferenceRule": "When user says 'this slide', target slideKey 'current_slide'. When user says 'a slide after this', target slideKey 'slide_after_current'. For selected objects use payload.selectedElements.name, and if name is empty use payload.selectedElements.alias with useSelection=true.",
+                "slideReorderRule": "For reordering, prefer moveBefore/moveAfter with target.slideKey and args.beforeSlideKey/afterSlideKey. Avoid index/toIndex/targetIndex in planner output.",
+                "selectorRule": "For ambiguous targets, use resolveTarget with args.selector fields: role, type, textEquals, textContains, textPrefix, isSelected, boundsNear. For element resolution, include target.elementName and reuse it in follow-up ops.",
+                "domHandleRule": "Prefer payload.presentationDOM canonical handles: slideKey for slides, and role-backed element handles (title/body/text) when available. If title text is ambiguous, resolve by exact slideKey from presentationDOM instead of fuzzy title matching.",
                 "intentCompilerRule": "Model output is intent-level. A local compiler will resolve handles and reject unsafe or ambiguous operations. Keep intent minimal, explicit, and bounded to objective.",
                 "strictContractRule": "Use only canonical fields. Put slideKey/elementName in target, never in args. For text roles use args.role ('title'|'body') or args.selector.role. Do not use non-canonical keys like kind, textType, existingSlideKey, slideTitleEquals. resolveTarget for slides does not require target.elementName.",
                 "destructiveSafetyRule": "Before deleteSlide/deleteElement, include assertState for the same target.",
@@ -662,8 +671,14 @@ private final class ProtoProgressFormatter {
             return "proto.error"
         case "agent_message":
             return "proto.agent_message received (finalizing)"
+        case "agent_message_delta":
+            return "proto.agent_message_delta"
+        case "agent_reasoning_section_break":
+            return "proto.agent_reasoning_section_break"
         case "agent_reasoning", "agent_reasoning_delta":
-            guard showRawReasoning else { return nil }
+            guard showRawReasoning else {
+                return "proto.\(event.type)"
+            }
             if let text = extractReasoningText(from: event.payload), !text.isEmpty {
                 return "proto.\(event.type): \(text)"
             }

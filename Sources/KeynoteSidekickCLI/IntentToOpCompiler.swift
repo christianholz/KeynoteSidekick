@@ -86,10 +86,40 @@ final class IntentToOpCompiler: @unchecked Sendable {
 
     private func destructiveConfirmed(_ objective: String) -> Bool {
         let lowered = objective.lowercased()
-        return lowered.contains("confirm") ||
+        let explicitConfirm = lowered.contains("confirm") ||
             lowered.contains("yes delete") ||
             lowered.contains("approved delete") ||
-            lowered.contains("go ahead and delete")
+            lowered.contains("go ahead and delete") ||
+            lowered.contains("go ahead and remove")
+        if explicitConfirm {
+            return true
+        }
+
+        let asksDeleteOrRemove = lowered.contains("delete") || lowered.contains("remove")
+        if !asksDeleteOrRemove {
+            return false
+        }
+
+        // Mass destructive requests still require explicit confirmation.
+        let massScopeCues = [
+            "all slides",
+            "every slide",
+            "entire deck",
+            "whole deck",
+            "entire presentation",
+            "whole presentation",
+            "delete everything",
+            "remove everything",
+            "reset the presentation",
+            "reset presentation",
+            "wipe"
+        ]
+        if massScopeCues.contains(where: { lowered.contains($0) }) {
+            return false
+        }
+
+        // Targeted delete/remove commands are explicit enough.
+        return true
     }
 
     private func isDestructive(_ opName: String) -> Bool {
@@ -115,7 +145,7 @@ final class IntentToOpCompiler: @unchecked Sendable {
         workingSlideKey: String?
     ) -> String? {
         if let explicit = target["slideKey"] as? String,
-           let resolved = normalizeSlideKey(explicit, knownBindings: knownBindings) {
+           let resolved = normalizeSlideKey(explicit, knownBindings: knownBindings, dom: dom) {
             return resolved
         }
 
@@ -182,7 +212,7 @@ final class IntentToOpCompiler: @unchecked Sendable {
         }
 
         if let key = selector["slideKey"] as? String,
-           let bound = normalizeSlideKey(key, knownBindings: knownBindings) {
+           let bound = normalizeSlideKey(key, knownBindings: knownBindings, dom: dom) {
             return bound
         }
 
@@ -217,12 +247,16 @@ final class IntentToOpCompiler: @unchecked Sendable {
         return nil
     }
 
-    private func normalizeSlideKey(_ raw: String, knownBindings: [String: Int]) -> String? {
+    private func normalizeSlideKey(
+        _ raw: String,
+        knownBindings: [String: Int],
+        dom: PresentationDOMSnapshot
+    ) -> String? {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
 
         if let index = knownBindings[trimmed] {
-            return "slide_\(index)"
+            return dom.slide(at: index)?.slideKey ?? trimmed
         }
 
         let normalized = trimmed
@@ -232,19 +266,15 @@ final class IntentToOpCompiler: @unchecked Sendable {
 
         if normalized == "current_slide" || normalized == "this_slide" || normalized == "active_slide",
            let index = knownBindings["current_slide"] {
-            return "slide_\(index)"
+            return dom.slide(at: index)?.slideKey ?? "current_slide"
         }
         if normalized == "slide_after_current" || normalized == "slide_after_this",
            let index = knownBindings["slide_after_current"] {
-            return "slide_\(index)"
+            return dom.slide(at: index)?.slideKey ?? "slide_after_current"
         }
 
         if let hinted = slideIndexHint(from: trimmed) {
-            return "slide_\(hinted)"
-        }
-
-        if trimmed.hasPrefix("slide_") {
-            return trimmed
+            return dom.slide(at: hinted)?.slideKey ?? trimmed
         }
 
         // Preserve planner-provided symbolic aliases (for example "conclusion_slide")

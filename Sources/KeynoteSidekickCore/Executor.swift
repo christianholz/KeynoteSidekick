@@ -75,6 +75,7 @@ public final class PlanExecutor {
                     verification: verification,
                     error: nil
                 ))
+                refreshBindingsAfterEveryOperation()
                 return
             } catch {
                 finalError = error
@@ -119,6 +120,7 @@ public final class PlanExecutor {
                     verification: verification,
                     error: nil
                 ))
+                refreshBindingsAfterEveryOperation()
                 return
             } catch {
                 finalError = error
@@ -178,6 +180,7 @@ public final class PlanExecutor {
                 verification: verification,
                 error: nil
             ))
+            refreshBindingsAfterEveryOperation()
         } catch {
             var rollbackMessage = "rollback disabled"
             if rollbackOnFailure && completed > 0 {
@@ -346,6 +349,11 @@ public final class PlanExecutor {
     private func refreshBindingsAfterStructuralSlideMutation() {
         // Rebind symbolic slide keys after structural mutations so subsequent ops
         // in the same plan resolve against current deck indices.
+        _ = try? adapter.refreshSlideBindings()
+    }
+
+    private func refreshBindingsAfterEveryOperation() {
+        // Keep slide-key bindings synchronized with the live deck after each op.
         _ = try? adapter.refreshSlideBindings()
     }
 

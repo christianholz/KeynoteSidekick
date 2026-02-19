@@ -87,7 +87,6 @@ struct PresentationDOMSnapshot: Sendable {
         "slideCount": slides.count,
         "slides": slides.map { slide in
           return [
-            "index": slide.index,
             "slideKey": slide.slideKey,
             "stableSlideId": slide.stableSlideId,
             "layoutName": slide.layoutName,
@@ -278,9 +277,14 @@ final class PresentationContextCollector: @unchecked Sendable {
                 let notesText = unescapeDOMText(fields["notes"] ?? "")
                 let layoutName = unescapeDOMText(fields["layout"] ?? "")
                 let masterName = unescapeDOMText(fields["master"] ?? layoutName)
-                let stableSlideId = "s\(index)"
+                let persistentIdRaw = unescapeDOMText(fields["sid"] ?? "")
+                let stableSlideId = stableSlideAlias(
+                    persistentId: persistentIdRaw,
+                    fallbackSeed: "index:\(index)"
+                )
+                let resolvedSlideKey = stableSlideId
                 let anchors = inferAnchors(
-                  slideKey: fields["key"] ?? "slide_\(index)",
+                  slideKey: resolvedSlideKey,
                   title: titleText,
                   body: bodyText,
                   textItems: textItems
@@ -300,7 +304,7 @@ final class PresentationContextCollector: @unchecked Sendable {
             slides.append(
                 PresentationDOMSlide(
                     index: index,
-                    slideKey: fields["key"] ?? "slide_\(index)",
+                    slideKey: resolvedSlideKey,
                     stableSlideId: stableSlideId,
                     layoutName: layoutName,
                     masterName: masterName,
@@ -368,6 +372,12 @@ final class PresentationContextCollector: @unchecked Sendable {
       }
 
       return anchors.sorted()
+    }
+
+    private func stableSlideAlias(persistentId: String, fallbackSeed: String) -> String {
+      let trimmed = persistentId.trimmingCharacters(in: .whitespacesAndNewlines)
+      let seed = trimmed.isEmpty ? "fallback:\(fallbackSeed)" : "persistent:\(trimmed)"
+      return "sref_\(stableTextHash(seed))"
     }
 
     private func stableTextHash(_ text: String) -> String {
@@ -855,7 +865,11 @@ final class PresentationContextCollector: @unchecked Sendable {
             set textItemsBlob to textParts as text
             set AppleScript's text item delimiters to ""
 
-            set rowText to "slide" & fieldSep & "index=" & (i as text) & fieldSep & "key=slide_" & (i as text) & fieldSep & "layout=" & (my sanitizeText(layoutName, fieldSep, itemSep)) & fieldSep & "master=" & (my sanitizeText(masterName, fieldSep, itemSep)) & fieldSep & "title=" & (my sanitizeText(titleText, fieldSep, itemSep)) & fieldSep & "body=" & (my sanitizeText(bodyText, fieldSep, itemSep)) & fieldSep & "notes=" & (my sanitizeText(notesText, fieldSep, itemSep)) & fieldSep & "textItems=" & textItemsBlob & fieldSep & "hasTitle=" & hasTitle & fieldSep & "hasBody=" & hasBody & fieldSep & "skipped=" & skippedText
+            set slidePersistentId to ""
+            try
+              set slidePersistentId to (id of s as text)
+            end try
+            set rowText to "slide" & fieldSep & "index=" & (i as text) & fieldSep & "key=slide_" & (i as text) & fieldSep & "sid=" & (my sanitizeText(slidePersistentId, fieldSep, itemSep)) & fieldSep & "layout=" & (my sanitizeText(layoutName, fieldSep, itemSep)) & fieldSep & "master=" & (my sanitizeText(masterName, fieldSep, itemSep)) & fieldSep & "title=" & (my sanitizeText(titleText, fieldSep, itemSep)) & fieldSep & "body=" & (my sanitizeText(bodyText, fieldSep, itemSep)) & fieldSep & "notes=" & (my sanitizeText(notesText, fieldSep, itemSep)) & fieldSep & "textItems=" & textItemsBlob & fieldSep & "hasTitle=" & hasTitle & fieldSep & "hasBody=" & hasBody & fieldSep & "skipped=" & skippedText
             set end of outLines to rowText
 
             set elementOrdinal to 0

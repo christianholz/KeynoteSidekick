@@ -173,7 +173,7 @@ enum PlanningScopeGuard {
     }
 
     private static func parseExplicitSlideCount(from loweredObjective: String) -> Int? {
-        let pattern = #"\b(add|insert|create|make)\s+(\d+)\s+slides?\b"#
+        let pattern = #"\b(add|insert|create|make)\s+(?:(?:a|an)\s+)?(\d+)(?:\s*-\s*|\s+)slides?\b"#
         guard let regex = try? NSRegularExpression(pattern: pattern, options: []),
               let match = regex.firstMatch(
                 in: loweredObjective,

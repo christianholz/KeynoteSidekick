@@ -1,6 +1,64 @@
 import SwiftUI
 import AppKit
 
+private enum ChatTheme {
+    static let contentLeading: CGFloat = 16
+    static let composerOuterHorizontalInset: CGFloat = 7
+    static let composerTextInsetX: CGFloat = contentLeading - composerOuterHorizontalInset
+
+    static let canvas = NSColor(
+        calibratedRed: 0.20,
+        green: 0.23,
+        blue: 0.27,
+        alpha: 1.0
+    )
+    static let composerArea = NSColor(
+        calibratedRed: 0.17,
+        green: 0.19,
+        blue: 0.23,
+        alpha: 1.0
+    )
+    static let sectionDivider = NSColor(white: 1.0, alpha: 0.10)
+    static let busyOverlay = NSColor(
+        calibratedRed: 0.14,
+        green: 0.16,
+        blue: 0.20,
+        alpha: 0.92
+    )
+    static let primaryText = NSColor(calibratedWhite: 0.90, alpha: 1.0)
+    static let secondaryText = NSColor(calibratedWhite: 0.72, alpha: 1.0)
+    static let accentText = NSColor(
+        calibratedRed: 0.66,
+        green: 0.79,
+        blue: 0.98,
+        alpha: 1.0
+    )
+    static let requestText = NSColor(
+        calibratedRed: 0.95,
+        green: 0.75,
+        blue: 0.45,
+        alpha: 1.0
+    )
+    static let responseText = NSColor(
+        calibratedRed: 0.60,
+        green: 0.86,
+        blue: 0.67,
+        alpha: 1.0
+    )
+    static let errorText = NSColor(
+        calibratedRed: 0.98,
+        green: 0.56,
+        blue: 0.56,
+        alpha: 1.0
+    )
+
+    static let canvasColor = Color(nsColor: canvas)
+    static let composerAreaColor = Color(nsColor: composerArea)
+    static let sectionDividerColor = Color(nsColor: sectionDivider)
+    static let secondaryTextColor = Color(nsColor: secondaryText)
+    static let accentTextColor = Color(nsColor: accentText)
+}
+
 struct ChatMessage: Identifiable {
     enum Role {
         case user
@@ -42,6 +100,7 @@ final class ChatViewModel: ObservableObject {
     @Published var isBusy = false
     @Published var isCodexActive = false
     @Published var busyStatusText = "Preparing request..."
+    @Published var isKeynoteRunning = false
 
     private let engine = LiveAutomationEngine()
     private let settings: AppConfigStore
@@ -51,16 +110,49 @@ final class ChatViewModel: ObservableObject {
 
     init(settings: AppConfigStore) {
         self.settings = settings
+        let keynoteRunning = Self.isKeynoteRunning()
+        self.isKeynoteRunning = keynoteRunning
+        let welcomeText: String
+        if keynoteRunning {
+            welcomeText = "Connected to Keynote"
+        } else {
+            welcomeText = "Keynote is not running"
+        }
         let welcome = ChatMessage(
             role: .assistant,
-            text: "Connected. Describe what you want changed in Keynote.",
+            text: welcomeText,
             timestamp: Date()
         )
         messages = [welcome]
         runLogWriter.append(rolePrefix: rolePrefix(welcome.role), text: welcome.text, at: welcome.timestamp)
     }
 
+    private static func isKeynoteRunning() -> Bool {
+        NSWorkspace.shared.runningApplications.contains { app in
+            app.bundleIdentifier == "com.apple.iWork.Keynote"
+        }
+    }
+
+    func refreshKeynoteAvailability(announceIfChanged: Bool) {
+        let current = Self.isKeynoteRunning()
+        let changed = (current != isKeynoteRunning)
+        if changed {
+            isKeynoteRunning = current
+            if announceIfChanged {
+                let message = current
+                    ? "Keynote detected. Composer enabled."
+                    : "Keynote not detected. Composer disabled."
+                append(role: .progress, text: message)
+            }
+        }
+    }
+
     func sendCurrentDraft() {
+        refreshKeynoteAvailability(announceIfChanged: true)
+        guard isKeynoteRunning else {
+            append(role: .error, text: "Keynote is not running. Open Keynote, then try again.")
+            return
+        }
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
         guard !isBusy else { return }
@@ -79,7 +171,7 @@ final class ChatViewModel: ObservableObject {
 
         draft = ""
         isBusy = true
-        busyStatusText = "Preparing request..."
+        setBusyStatus("Preparing request...")
         runLogWriter.markRunStart(prompt: text)
         append(role: .user, text: text)
         append(role: .progress, text: "Preparing request...")
@@ -100,10 +192,10 @@ final class ChatViewModel: ObservableObject {
                             if self.busyStatusText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
                                 self.busyStatusText == "Preparing request..." ||
                                 self.busyStatusText == "Applying changes in Keynote..." {
-                                self.busyStatusText = "Waiting for Codex response..."
+                                self.setBusyStatus("Waiting for Codex response...")
                             }
                         } else if self.isBusy {
-                            self.busyStatusText = "Applying changes in Keynote..."
+                            self.setBusyStatus("Applying changes in Keynote...")
                         }
                     }
                 },
@@ -141,7 +233,7 @@ final class ChatViewModel: ObservableObject {
                 guard let self else { return }
                 self.runCancellationToken = nil
                 self.isCodexActive = false
-                self.busyStatusText = ""
+                self.setBusyStatus("")
 
                 if outcome.cancelled {
                     if self.messages.last?.text != "Run canceled by user." {
@@ -161,7 +253,7 @@ final class ChatViewModel: ObservableObject {
     func stopCurrentRun() {
         guard isBusy else { return }
         runCancellationToken?.cancel()
-        busyStatusText = "Cancel requested..."
+        setBusyStatus("Cancel requested...")
         append(role: .progress, text: "Cancel requested by user...")
     }
 
@@ -181,7 +273,8 @@ final class ChatViewModel: ObservableObject {
 
     private func isReasoningEvent(_ event: String) -> Bool {
         event.hasPrefix("Codex event: proto.agent_reasoning") ||
-            event.hasPrefix("Codex event: proto.agent_reasoning_delta")
+            event.hasPrefix("Codex event: proto.agent_reasoning_delta") ||
+            event.hasPrefix("Codex event: proto.agent_reasoning_section_break")
     }
 
     private func updateBusyStatus(from event: String) {
@@ -189,56 +282,63 @@ final class ChatViewModel: ObservableObject {
         guard !trimmed.isEmpty else { return }
 
         if trimmed.hasPrefix("Sending request to Codex") {
-            busyStatusText = "Sending request to Codex..."
+            setBusyStatus("Sending request to Codex...")
             return
         }
 
-        if trimmed.hasPrefix("Codex event: proto.agent_reasoning:") ||
-            trimmed.hasPrefix("Codex event: proto.agent_reasoning_delta:") {
-            let payload = trimmed
-                .replacingOccurrences(of: "Codex event: proto.agent_reasoning_delta:", with: "")
-                .replacingOccurrences(of: "Codex event: proto.agent_reasoning:", with: "")
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            if !payload.isEmpty {
-                busyStatusText = "Codex: \(truncateStatus(payload, max: 120))"
-            } else {
-                busyStatusText = "Codex is thinking..."
-            }
+        if trimmed.hasPrefix("Codex event: proto.task_started") {
+            setBusyStatus("Waiting for Codex response...")
             return
         }
 
         if trimmed.hasPrefix("Codex event: proto.heartbeat ") {
-            let payload = trimmed.replacingOccurrences(of: "Codex event: ", with: "")
-            busyStatusText = "Codex: \(truncateStatus(payload, max: 120))"
+            let token = trimmed
+                .replacingOccurrences(of: "Codex event: proto.heartbeat ", with: "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if let secondsToken = token.split(separator: " ").first {
+                setBusyStatus("Codex is thinking... (\(secondsToken))")
+            } else {
+                setBusyStatus("Codex is thinking...")
+            }
             return
         }
 
-        if trimmed.hasPrefix("Codex event: ") {
-            let payload = trimmed.replacingOccurrences(of: "Codex event: ", with: "")
-            busyStatusText = "Codex: \(truncateStatus(payload, max: 120))"
+        if trimmed.hasPrefix("Codex event: proto.agent_reasoning") ||
+            trimmed.hasPrefix("Codex event: proto.agent_message_delta") {
+            setBusyStatus("Codex is preparing response...")
+            return
+        }
+
+        if trimmed.hasPrefix("Codex event: proto.agent_message received (finalizing)") {
+            setBusyStatus("Finalizing Codex response...")
             return
         }
 
         if trimmed.hasPrefix("Collecting full presentation context from Keynote") ||
             trimmed.hasPrefix("Collecting presentation context from Keynote") {
-            busyStatusText = "Collecting Keynote context..."
+            setBusyStatus("Collecting Keynote context...")
             return
         }
 
         if trimmed.hasPrefix("Capturing presentation state") {
-            busyStatusText = "Capturing deck state..."
+            setBusyStatus("Capturing deck state...")
             return
         }
 
         if trimmed.hasPrefix("Reflection iteration ") {
-            busyStatusText = truncateStatus(trimmed, max: 120)
+            setBusyStatus(truncateStatus(trimmed, max: 120))
             return
         }
 
         if trimmed.hasPrefix("Execution complete.") {
-            busyStatusText = "Execution complete."
+            setBusyStatus("Execution complete.")
             return
         }
+    }
+
+    private func setBusyStatus(_ status: String) {
+        guard busyStatusText != status else { return }
+        busyStatusText = status
     }
 
     private func truncateStatus(_ text: String, max: Int) -> String {
@@ -270,6 +370,8 @@ struct ChatPanelView: View {
     @StateObject private var model: ChatViewModel
     @State private var showSettings = false
     @State private var composerHeight: CGFloat = 36
+    @State private var isComposerFocused = false
+    @State private var isWindowActive = true
     @State private var inputFocusNonce: Int = 0
     @State private var didRunInitialSetupCheck = false
 
@@ -282,10 +384,17 @@ struct ChatPanelView: View {
     var body: some View {
         VStack(spacing: 0) {
             transcript
-            Divider()
             inputBar
+                .padding(.top, 7)
+                .padding(.bottom, 8)
+                .background(ChatTheme.composerAreaColor)
+                .overlay(alignment: .top) {
+                    Rectangle()
+                        .fill(ChatTheme.sectionDividerColor)
+                        .frame(height: 1)
+                }
         }
-        .background(Color(nsColor: .windowBackgroundColor))
+        .background(ChatTheme.canvasColor)
         .sheet(isPresented: $showSettings) {
             SettingsDialogView(settings: settings)
         }
@@ -293,16 +402,22 @@ struct ChatPanelView: View {
             showSettings = true
         }
         .onAppear {
+            model.refreshKeynoteAvailability(announceIfChanged: false)
             DispatchQueue.main.async {
                 inputFocusNonce += 1
             }
             runInitialSetupBootstrapIfNeeded()
         }
         .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { _ in
+            model.refreshKeynoteAvailability(announceIfChanged: true)
+            isWindowActive = true
             guard !showSettings else { return }
             DispatchQueue.main.async {
                 inputFocusNonce += 1
             }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didResignKeyNotification)) { _ in
+            isWindowActive = false
         }
         .onChange(of: model.isBusy) { busy in
             guard !busy, !showSettings else { return }
@@ -313,23 +428,34 @@ struct ChatPanelView: View {
     }
 
     private var transcript: some View {
-        TranscriptTextView(messages: model.messages)
+        TranscriptTextView(messages: model.messages, isWindowActive: isWindowActive)
     }
 
     private var inputBar: some View {
-        HStack(spacing: 8) {
+        ZStack(alignment: .trailing) {
             ZStack(alignment: .topLeading) {
-                if model.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !model.isBusy {
+                if !model.isKeynoteRunning {
+                    Text("Open Keynote to enable edits...")
+                        .font(.system(size: 14, weight: .regular))
+                        .foregroundStyle(ChatTheme.secondaryTextColor)
+                        .padding(.horizontal, ChatTheme.composerTextInsetX)
+                        .padding(.vertical, 8)
+                        .allowsHitTesting(false)
+                } else if model.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+                    !model.isBusy &&
+                    !isComposerFocused {
                     Text("Describe what to change in Keynote...")
-                        .foregroundStyle(.secondary)
-                        .padding(.horizontal, 9)
+                        .font(.system(size: 14, weight: .regular))
+                        .foregroundStyle(ChatTheme.secondaryTextColor)
+                        .padding(.horizontal, ChatTheme.composerTextInsetX)
                         .padding(.vertical, 8)
                         .allowsHitTesting(false)
                 }
                 PromptComposerTextView(
                     text: $model.draft,
                     height: $composerHeight,
-                    isEditable: !model.isBusy,
+                    isFocused: $isComposerFocused,
+                    isEditable: !model.isBusy && model.isKeynoteRunning,
                     focusNonce: inputFocusNonce,
                     onSend: {
                         model.sendCurrentDraft()
@@ -342,21 +468,17 @@ struct ChatPanelView: View {
                             .controlSize(.small)
                         Text(model.busyStatusText)
                             .font(.caption)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(ChatTheme.secondaryTextColor)
                         Spacer()
                     }
-                    .padding(.horizontal, 9)
+                    .padding(.horizontal, ChatTheme.composerTextInsetX)
                     .padding(.vertical, 8)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
-                    .background(Color(nsColor: .controlBackgroundColor).opacity(0.92))
                     .allowsHitTesting(false)
                 }
             }
+            .padding(.trailing, 34)
             .frame(height: composerHeight)
-            .overlay(
-                RoundedRectangle(cornerRadius: 6)
-                    .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
-            )
 
             Button {
                 if model.isBusy {
@@ -364,7 +486,7 @@ struct ChatPanelView: View {
                 } else {
                     model.sendCurrentDraft()
                 }
-            } label: {
+                } label: {
                 if model.isBusy {
                     Image(systemName: "stop.fill")
                         .font(.system(size: 12, weight: .bold))
@@ -374,14 +496,16 @@ struct ChatPanelView: View {
                         .font(.system(size: 13, weight: .semibold))
                         .frame(width: 18, height: 18)
                 }
-            }
-            .buttonStyle(.borderedProminent)
-            .tint(model.isBusy ? .red : .accentColor)
-            .controlSize(.regular)
+                }
+            .buttonStyle(.plain)
+            .frame(width: 24, height: 24)
+            .foregroundStyle(model.isBusy ? Color.red : ChatTheme.accentTextColor)
             .keyboardShortcut(.return, modifiers: [])
-            .disabled(!model.isBusy && model.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            .disabled(!model.isBusy && (!model.isKeynoteRunning || model.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty))
+            .opacity((!model.isBusy && (!model.isKeynoteRunning || model.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)) ? 0.55 : 1.0)
+            .padding(.trailing, 10)
         }
-        .padding(12)
+        .padding(.horizontal, ChatTheme.composerOuterHorizontalInset)
     }
 
     private func runInitialSetupBootstrapIfNeeded() {
@@ -441,6 +565,7 @@ private final class PromptInputNSTextView: NSTextView {
 private struct PromptComposerTextView: NSViewRepresentable {
     @Binding var text: String
     @Binding var height: CGFloat
+    @Binding var isFocused: Bool
     let isEditable: Bool
     let focusNonce: Int
     let onSend: () -> Void
@@ -454,7 +579,9 @@ private struct PromptComposerTextView: NSViewRepresentable {
         textView.onSend = onSend
         textView.drawsBackground = false
         textView.backgroundColor = .clear
-        textView.font = .systemFont(ofSize: NSFont.systemFontSize)
+        textView.font = .systemFont(ofSize: 14, weight: .regular)
+        textView.textColor = ChatTheme.primaryText
+        textView.insertionPointColor = ChatTheme.primaryText
         textView.isRichText = false
         textView.importsGraphics = false
         textView.isContinuousSpellCheckingEnabled = true
@@ -463,10 +590,11 @@ private struct PromptComposerTextView: NSViewRepresentable {
         textView.isAutomaticDashSubstitutionEnabled = false
         textView.isHorizontallyResizable = false
         textView.isVerticallyResizable = true
-        textView.textContainerInset = NSSize(width: 4, height: 6)
+        textView.textContainerInset = NSSize(width: ChatTheme.composerTextInsetX, height: 8)
         textView.autoresizingMask = [.width]
         textView.textContainer?.containerSize = NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude)
         textView.textContainer?.widthTracksTextView = true
+        textView.textContainer?.lineFragmentPadding = 0
         textView.string = text
         textView.isEditable = isEditable
 
@@ -495,11 +623,17 @@ private struct PromptComposerTextView: NSViewRepresentable {
         if textView.isEditable != isEditable {
             textView.isEditable = isEditable
         }
+        if !isEditable && isFocused {
+            DispatchQueue.main.async {
+                isFocused = false
+            }
+        }
 
         if context.coordinator.lastFocusNonce != focusNonce, let window = textView.window {
             context.coordinator.lastFocusNonce = focusNonce
             DispatchQueue.main.async {
                 window.makeFirstResponder(textView)
+                isFocused = true
             }
         }
 
@@ -540,11 +674,24 @@ private struct PromptComposerTextView: NSViewRepresentable {
             }
             parent.recalculateHeight(for: textView)
         }
+
+        func textDidBeginEditing(_ notification: Notification) {
+            if !parent.isFocused {
+                parent.isFocused = true
+            }
+        }
+
+        func textDidEndEditing(_ notification: Notification) {
+            if parent.isFocused {
+                parent.isFocused = false
+            }
+        }
     }
 }
 
 struct TranscriptTextView: NSViewRepresentable {
     let messages: [ChatMessage]
+    let isWindowActive: Bool
 
     func makeNSView(context: Context) -> NSScrollView {
         let textView = NSTextView()
@@ -555,9 +702,9 @@ struct TranscriptTextView: NSViewRepresentable {
         textView.usesFontPanel = false
         textView.usesFindBar = true
         textView.allowsUndo = false
-        textView.font = .monospacedSystemFont(ofSize: NSFont.systemFontSize, weight: .regular)
-        textView.textContainerInset = NSSize(width: 12, height: 12)
-        textView.backgroundColor = .clear
+        textView.font = .systemFont(ofSize: 14.5, weight: .regular)
+        textView.textContainerInset = NSSize(width: ChatTheme.contentLeading, height: 14)
+        textView.backgroundColor = ChatTheme.canvas
         textView.drawsBackground = true
         textView.isVerticallyResizable = true
         textView.isHorizontallyResizable = false
@@ -565,13 +712,15 @@ struct TranscriptTextView: NSViewRepresentable {
         textView.textContainer?.containerSize = NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude)
         textView.textContainer?.widthTracksTextView = true
         textView.textContainer?.heightTracksTextView = false
+        textView.textContainer?.lineFragmentPadding = 0
 
         let scrollView = NSScrollView()
         scrollView.hasVerticalScroller = true
         scrollView.hasHorizontalScroller = false
         scrollView.borderType = .noBorder
         scrollView.autohidesScrollers = true
-        scrollView.drawsBackground = false
+        scrollView.drawsBackground = true
+        scrollView.backgroundColor = ChatTheme.canvas
         scrollView.documentView = textView
 
         context.coordinator.textView = textView
@@ -581,7 +730,9 @@ struct TranscriptTextView: NSViewRepresentable {
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
         guard let textView = context.coordinator.textView else { return }
         let newPlainText = messages.map { "\(rolePrefix($0.role)): \($0.text)" }.joined(separator: "\n")
-        guard textView.string != newPlainText else { return }
+        let needsStyleRefresh = context.coordinator.lastWindowActive != isWindowActive
+        context.coordinator.lastWindowActive = isWindowActive
+        guard textView.string != newPlainText || needsStyleRefresh else { return }
 
         let shouldStickToBottom = isNearBottom(scrollView)
         let clipView = scrollView.contentView
@@ -650,17 +801,21 @@ struct TranscriptTextView: NSViewRepresentable {
 
     final class Coordinator {
         weak var textView: NSTextView?
+        var lastWindowActive: Bool?
     }
 
     private func attributedTranscript() -> NSAttributedString {
         let out = NSMutableAttributedString()
-        let font = NSFont.monospacedSystemFont(ofSize: NSFont.systemFontSize, weight: .regular)
+        let font = NSFont.systemFont(ofSize: 14.5, weight: .regular)
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.lineSpacing = 3.0
 
         for (index, message) in messages.enumerated() {
             let line = "\(rolePrefix(message.role)): \(message.text)"
             let attributes: [NSAttributedString.Key: Any] = [
                 .font: font,
-                .foregroundColor: roleColor(message.role)
+                .foregroundColor: roleColor(message.role),
+                .paragraphStyle: paragraph
             ]
             out.append(NSAttributedString(string: line, attributes: attributes))
             if index < messages.count - 1 {
@@ -689,20 +844,25 @@ struct TranscriptTextView: NSViewRepresentable {
     }
 
     private func roleColor(_ role: ChatMessage.Role) -> NSColor {
+        let base: NSColor
         switch role {
         case .user:
-            return .controlAccentColor
+            base = ChatTheme.accentText
         case .assistant:
-            return .labelColor
+            base = ChatTheme.primaryText
         case .progress:
-            return .secondaryLabelColor
+            base = ChatTheme.secondaryText
         case .codexRequest:
-            return .systemOrange
+            base = ChatTheme.requestText
         case .codexResponse:
-            return .systemGreen
+            base = ChatTheme.responseText
         case .error:
-            return .systemRed
+            base = ChatTheme.errorText
         }
+        if isWindowActive {
+            return base
+        }
+        return base.withAlphaComponent(0.78)
     }
 }
 
@@ -728,168 +888,189 @@ struct SettingsDialogView: View {
     private let logPaths = RunLogWriter.shared.logPaths
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text("Settings")
-                .font(.title3.weight(.semibold))
+        VStack(spacing: 0) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    Text("Settings")
+                        .font(.title3.weight(.semibold))
 
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Codex CLI Path")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                TextField("codex", text: $codexPath)
-                    .textFieldStyle(.roundedBorder)
-            }
-
-            VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    Text("ChatGPT Login")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                    Button("Check Status") {
-                        refreshCodexStatus()
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Codex CLI Path")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        TextField("codex", text: $codexPath)
+                            .textFieldStyle(.roundedBorder)
                     }
-                    .buttonStyle(.link)
-                    .disabled(isCheckingStatus)
-                    Button("Run codex login") {
-                        openTerminalForCodexLogin()
-                    }
-                    .buttonStyle(.link)
-                }
 
-                Text(codexStatus.isEmpty ? "Status not checked yet." : codexStatus)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .textSelection(.enabled)
-            }
-
-            VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    Text("Model")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                    Button("Load Available Models") {
-                        refreshAvailableModels()
-                    }
-                    .buttonStyle(.link)
-                    .disabled(isLoadingModels)
-                }
-                TextField("e.g. gpt-5.2-codex", text: $model)
-                    .textFieldStyle(.roundedBorder)
-                if !availableModels.isEmpty {
-                    Picker("Discovered", selection: $model) {
-                        ForEach(availableModels, id: \.self) { candidate in
-                            Text(candidate).tag(candidate)
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Text("ChatGPT Login")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                            Button("Check Status") {
+                                refreshCodexStatus()
+                            }
+                            .buttonStyle(.link)
+                            .disabled(isCheckingStatus)
+                            Button("Run codex login") {
+                                openTerminalForCodexLogin()
+                            }
+                            .buttonStyle(.link)
                         }
-                        if !availableModels.contains(model) {
-                            Text(model).tag(model)
-                        }
+
+                        Text(codexStatus.isEmpty ? "Status not checked yet." : codexStatus)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
                     }
-                    .pickerStyle(.menu)
-                }
-                if isLoadingModels {
-                    HStack(spacing: 6) {
-                        ProgressView()
-                            .controlSize(.small)
-                        Text("Discovering models...")
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Text("Model")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                            Button("Load Available Models") {
+                                refreshAvailableModels()
+                            }
+                            .buttonStyle(.link)
+                            .disabled(isLoadingModels)
+                        }
+                        TextField("e.g. gpt-5.2-codex", text: $model)
+                            .textFieldStyle(.roundedBorder)
+
+                        Group {
+                            if !availableModels.isEmpty {
+                                Picker("Discovered", selection: $model) {
+                                    ForEach(availableModels, id: \.self) { candidate in
+                                        Text(candidate).tag(candidate)
+                                    }
+                                    if !availableModels.contains(model) {
+                                        Text(model).tag(model)
+                                    }
+                                }
+                                .pickerStyle(.menu)
+                            } else {
+                                Text("Discovered models will appear here.")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                                    .opacity(0.5)
+                            }
+                        }
+                        .frame(height: 22, alignment: .leading)
+
+                        Group {
+                            if isLoadingModels {
+                                HStack(spacing: 6) {
+                                    ProgressView()
+                                        .controlSize(.small)
+                                    Text("Discovering models...")
+                                }
+                            } else if !modelDiscoveryStatus.isEmpty {
+                                Text(modelDiscoveryStatus)
+                            } else {
+                                Text(" ")
+                            }
+                        }
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .frame(minHeight: 16, alignment: .leading)
+                    }
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Reasoning Effort")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Picker("Reasoning Effort", selection: $reasoningEffort) {
+                            Text("Low").tag("low")
+                            Text("Medium").tag("medium")
+                            Text("High").tag("high")
+                        }
+                        .pickerStyle(.segmented)
+                        Text("Higher effort can improve plan quality but increases latency.")
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                     }
-                } else if !modelDiscoveryStatus.isEmpty {
-                    Text(modelDiscoveryStatus)
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                }
-            }
 
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Reasoning Effort")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Picker("Reasoning Effort", selection: $reasoningEffort) {
-                    Text("Low").tag("low")
-                    Text("Medium").tag("medium")
-                    Text("High").tag("high")
-                }
-                .pickerStyle(.segmented)
-                Text("Higher effort can improve plan quality but increases latency.")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-            }
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Reasoning Visibility")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
 
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Reasoning Visibility")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                        Picker("Reasoning Summary", selection: $modelReasoningSummary) {
+                            Text("Auto").tag("auto")
+                            Text("Brief").tag("brief")
+                            Text("Detailed").tag("detailed")
+                        }
+                        .pickerStyle(.segmented)
 
-                Picker("Reasoning Summary", selection: $modelReasoningSummary) {
-                    Text("Auto").tag("auto")
-                    Text("Brief").tag("brief")
-                    Text("Detailed").tag("detailed")
-                }
-                .pickerStyle(.segmented)
+                        Toggle("Hide agent reasoning", isOn: $hideAgentReasoning)
+                            .toggleStyle(.checkbox)
+                        Toggle("Show raw agent reasoning events", isOn: $showRawAgentReasoning)
+                            .toggleStyle(.checkbox)
 
-                Toggle("Hide agent reasoning", isOn: $hideAgentReasoning)
+                        Text("Raw reasoning can expose verbose internal model traces in the transcript.")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("System Prompt")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Text("Always applied to Codex planning for this app.")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                        TextEditor(text: $systemPrompt)
+                            .font(.system(size: NSFont.systemFontSize))
+                            .frame(minHeight: 110, maxHeight: 180)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 6)
+                                    .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
+                            )
+                    }
+
+                    Toggle(isOn: $debugLoggingEnabled) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Show debug logs in transcript")
+                            Text("Includes Codex request/response payloads and proto heartbeat/usage events.")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
                     .toggleStyle(.checkbox)
-                Toggle("Show raw agent reasoning events", isOn: $showRawAgentReasoning)
+
+                    Toggle(isOn: $reflectionBasedEditsEnabled) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Reflection-based edits")
+                            Text("Captures per-run before/after deck state, runs codex self-check/repair loops, and keeps logs only when repairs were needed.")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
                     .toggleStyle(.checkbox)
 
-                Text("Raw reasoning can expose verbose internal model traces in the transcript.")
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Run log: \(logPaths.transcript)")
+                        Text("Failure log: \(logPaths.failures)")
+                        Text("Reflection logs: \(logPaths.reflectionRuns)")
+                    }
                     .font(.caption2)
                     .foregroundStyle(.secondary)
-            }
+                    .textSelection(.enabled)
 
-            VStack(alignment: .leading, spacing: 8) {
-                Text("System Prompt")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Text("Always applied to Codex planning for this app.")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                TextEditor(text: $systemPrompt)
-                    .font(.system(size: NSFont.systemFontSize))
-                    .frame(minHeight: 110, maxHeight: 180)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 6)
-                            .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
-                    )
-            }
-
-            Toggle(isOn: $debugLoggingEnabled) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Show debug logs in transcript")
-                    Text("Includes Codex request/response payloads and proto heartbeat/usage events.")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
+                    if let errorMessage {
+                        Text(errorMessage)
+                            .foregroundStyle(.red)
+                            .font(.caption)
+                    }
                 }
+                .padding(18)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .toggleStyle(.checkbox)
 
-            Toggle(isOn: $reflectionBasedEditsEnabled) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Reflection-based edits")
-                    Text("Captures per-run before/after deck state, runs codex self-check/repair loops, and keeps logs only when repairs were needed.")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .toggleStyle(.checkbox)
-
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Run log: \(logPaths.transcript)")
-                Text("Failure log: \(logPaths.failures)")
-                Text("Reflection logs: \(logPaths.reflectionRuns)")
-            }
-            .font(.caption2)
-            .foregroundStyle(.secondary)
-            .textSelection(.enabled)
-
-            if let errorMessage {
-                Text(errorMessage)
-                    .foregroundStyle(.red)
-                    .font(.caption)
-            }
+            Divider()
 
             HStack {
                 Spacer()
@@ -901,9 +1082,10 @@ struct SettingsDialogView: View {
                 }
                 .keyboardShortcut(.defaultAction)
             }
+            .padding(.horizontal, 18)
+            .padding(.vertical, 12)
         }
-        .padding(18)
-        .frame(width: 560)
+        .frame(width: 560, height: 760)
         .onAppear {
             codexPath = settings.codexPath
             model = settings.model

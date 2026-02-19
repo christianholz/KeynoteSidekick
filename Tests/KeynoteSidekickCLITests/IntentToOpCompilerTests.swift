@@ -26,6 +26,29 @@ struct IntentToOpCompilerTests {
         #expect(firstTarget?["slideKey"] as? String == "slide_2")
     }
 
+    @Test("Resolves deictic slide key to stable DOM slide key when available")
+    func resolvesCurrentSlideAliasToStableDOMKey() {
+        let compiler = IntentToOpCompiler()
+        let dom = stableSampleDOM()
+        let result = compiler.compile(
+            operations: [
+                [
+                    "op": "ensureTextBox",
+                    "target": ["slideKey": "current_slide"],
+                    "args": ["text": "Hello"]
+                ]
+            ],
+            objective: "Add text to this slide",
+            dom: dom,
+            knownBindings: ["current_slide": 2],
+            focus: PresentationFocusContext(currentSlideIndex: 2, currentSlideTitle: "Examples", selectedItems: []),
+            workingSlideKey: nil
+        )
+
+        let firstTarget = result.operations.first?["target"] as? [String: Any]
+        #expect(firstTarget?["slideKey"] as? String == "sref_2222")
+    }
+
     @Test("Resolves title/body element names from DOM placeholders")
     func resolvesElementByRole() {
         let compiler = IntentToOpCompiler()
@@ -49,8 +72,8 @@ struct IntentToOpCompilerTests {
         #expect(firstTarget?["elementName"] as? String == "Title")
     }
 
-    @Test("Drops destructive operations without explicit confirmation")
-    func dropsDestructiveWithoutConfirmation() {
+    @Test("Allows targeted destructive operation from explicit user request")
+    func allowsTargetedDestructiveWithoutExtraConfirmPhrase() {
         let compiler = IntentToOpCompiler()
         let result = compiler.compile(
             operations: [
@@ -60,7 +83,29 @@ struct IntentToOpCompilerTests {
                     "args": [:]
                 ]
             ],
-            objective: "Delete the second slide",
+            objective: "remove the duplicate slide",
+            dom: sampleDOM(),
+            knownBindings: [:],
+            focus: .empty,
+            workingSlideKey: nil
+        )
+
+        #expect(result.operations.count == 1)
+        #expect(result.diagnostics.isEmpty)
+    }
+
+    @Test("Drops mass destructive operations without explicit confirmation")
+    func dropsMassDestructiveWithoutConfirmation() {
+        let compiler = IntentToOpCompiler()
+        let result = compiler.compile(
+            operations: [
+                [
+                    "op": "deleteSlide",
+                    "target": ["slideKey": "slide_2"],
+                    "args": [:]
+                ]
+            ],
+            objective: "delete all slides",
             dom: sampleDOM(),
             knownBindings: [:],
             focus: .empty,
@@ -139,6 +184,53 @@ struct IntentToOpCompilerTests {
                     index: 2,
                     slideKey: "slide_2",
                     stableSlideId: "s2",
+                    layoutName: "Title & Bullets",
+                    masterName: "Title & Bullets",
+                    title: "Examples",
+                    body: "Example set",
+                    notes: "",
+                    titleHash: "e",
+                    bodyHash: "f",
+                    notesHash: "g",
+                    textItems: ["Example one"],
+                    textItemHashes: ["h"],
+                    anchors: ["title:examples"],
+                    elements: [],
+                    hasTitlePlaceholder: true,
+                    hasBodyPlaceholder: true,
+                    isSkipped: false
+                )
+            ]
+        )
+    }
+
+    private func stableSampleDOM() -> PresentationDOMSnapshot {
+        PresentationDOMSnapshot(
+            slides: [
+                PresentationDOMSlide(
+                    index: 1,
+                    slideKey: "sref_1111",
+                    stableSlideId: "sref_1111",
+                    layoutName: "Title & Bullets",
+                    masterName: "Title & Bullets",
+                    title: "Intro",
+                    body: "Overview",
+                    notes: "",
+                    titleHash: "a",
+                    bodyHash: "b",
+                    notesHash: "c",
+                    textItems: ["Overview"],
+                    textItemHashes: ["d"],
+                    anchors: ["title:intro"],
+                    elements: [],
+                    hasTitlePlaceholder: true,
+                    hasBodyPlaceholder: true,
+                    isSkipped: false
+                ),
+                PresentationDOMSlide(
+                    index: 2,
+                    slideKey: "sref_2222",
+                    stableSlideId: "sref_2222",
                     layoutName: "Title & Bullets",
                     masterName: "Title & Bullets",
                     title: "Examples",

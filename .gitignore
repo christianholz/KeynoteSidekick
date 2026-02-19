@@ -86,3 +86,6 @@ tmp/
 *.tmp
 
 AGENTS.md
+*.md
+*.json
+Tests/KeynoteSidekickApplicationTests/

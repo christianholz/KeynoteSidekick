@@ -227,17 +227,11 @@ final class LiveAutomationEngine: @unchecked Sendable {
                     note("Focus context warning: \(focusWarning)")
                 }
                 note("Focus context:\n\(contextCollector.describeFocus(focus))")
-                var plannerBindings = knownBindings
-                for slide in contextSlidesForBindings {
-                    plannerBindings["slide_\(slide.index)"] = slide.index
-                }
-                if let currentSlideIndex = focus.currentSlideIndex {
-                    plannerBindings["current_slide"] = currentSlideIndex
-                    plannerBindings["this_slide"] = currentSlideIndex
-                    plannerBindings["active_slide"] = currentSlideIndex
-                    plannerBindings["slide_after_current"] = currentSlideIndex + 1
-                    plannerBindings["slide_after_this"] = currentSlideIndex + 1
-                }
+                let plannerBindings = plannerBindingsForCodex(
+                    baseBindings: knownBindings,
+                    contextSlides: contextSlidesForBindings,
+                    focus: focus
+                )
 
                 if let localPlan = intentCompiler.compileDirectIntent(
                     objective: trimmed,
@@ -393,6 +387,13 @@ final class LiveAutomationEngine: @unchecked Sendable {
                     focus: focus,
                     workingSlideKey: currentSlideKey
                 )
+                let droppedDestructiveOps = droppedDestructiveOps(from: compiledIntent.diagnostics)
+                if !droppedDestructiveOps.isEmpty, objectiveRequestsDestructiveChange(trimmed) {
+                    let droppedSummary = droppedDestructiveOps.sorted().joined(separator: ", ")
+                    let message = "Destructive edits were requested but not confirmed (\(droppedSummary)). Re-run with explicit confirmation, for example: \"confirm delete all slides, then ...\"."
+                    note("Execution failed: \(message)")
+                    return AutomationOutcome(success: false, cancelled: false, reply: message, progress: progress)
+                }
                 if diagnosticLoggingEnabled, !compiledIntent.diagnostics.isEmpty {
                     note("Intent compiler diagnostics:\n\(compiledIntent.diagnostics.joined(separator: "\n"))")
                 }
@@ -758,6 +759,15 @@ final class LiveAutomationEngine: @unchecked Sendable {
             progress: progress
         )
 
+        if !primary.success,
+           primary.reply.lowercased().contains("explicit confirmation") {
+            let keptPath = runLogWriter.finishReflectionRun(reflectionLog, retain: true)
+            if let keptPath {
+                note("Reflection run log retained: \(keptPath)")
+            }
+            return finalOutcome
+        }
+
         var keepReflectionLog = true
         var repairsApplied = 0
         var reflectionConfirmed = false
@@ -1020,18 +1030,12 @@ final class LiveAutomationEngine: @unchecked Sendable {
         rawBindings: [String: Int]
     ) -> [String: Int] {
         let contextSlidesForBindings = contextSlides(from: snapshot.dom, fallbackContext: snapshot.context)
-        var plannerBindings = sanitizeKnownBindings(rawBindings, contextSlides: contextSlidesForBindings)
-        for slide in contextSlidesForBindings {
-            plannerBindings["slide_\(slide.index)"] = slide.index
-        }
-        if let currentSlideIndex = snapshot.focus.currentSlideIndex {
-            plannerBindings["current_slide"] = currentSlideIndex
-            plannerBindings["this_slide"] = currentSlideIndex
-            plannerBindings["active_slide"] = currentSlideIndex
-            plannerBindings["slide_after_current"] = currentSlideIndex + 1
-            plannerBindings["slide_after_this"] = currentSlideIndex + 1
-        }
-        return plannerBindings
+        let sanitized = sanitizeKnownBindings(rawBindings, contextSlides: contextSlidesForBindings)
+        return plannerBindingsForCodex(
+            baseBindings: sanitized,
+            contextSlides: contextSlidesForBindings,
+            focus: snapshot.focus
+        )
     }
 
     private func reflectionObjective(for objective: String, iteration: Int) -> String {
@@ -1161,6 +1165,7 @@ final class LiveAutomationEngine: @unchecked Sendable {
         var elementSlideBindings: [String: String] = [:]
         var slideKeyRewrites: [String: String] = [:]
         var insertedSlideAliasByIndex: [Int: String] = [:]
+        var createdSlideAliases = Set<String>()
         var consumedEnsureSlideTitles = Set<String>()
         var plannedInsertions: [Int] = []
         var materializedSlideKeys = Set(knownBindings.keys)
@@ -1172,6 +1177,7 @@ final class LiveAutomationEngine: @unchecked Sendable {
         let insertionObjective = PlanningScopeGuard.explicitSlideBudget(objective: userInput) != nil
         let plannedTitleBySlideKey = plannedTitleHints(from: operations)
         let contextSlides = contextSlides(from: domSnapshot, fallbackContext: presentationContext)
+        let maxContextSlideIndex = contextSlides.map(\.index).max() ?? 0
         let selectedNames = selectedItems
             .map { $0.name.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
@@ -1192,7 +1198,7 @@ final class LiveAutomationEngine: @unchecked Sendable {
             guard let rawOpName = raw["op"] as? String, !rawOpName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                 continue
             }
-            let opName = normalizeOperationName(rawOpName)
+            var opName = normalizeOperationName(rawOpName)
 
             // Live sidecar mode is strictly "front presentation only".
             // Never allow planner-generated document open/switch operations.
@@ -1210,6 +1216,30 @@ final class LiveAutomationEngine: @unchecked Sendable {
             var deferredOps: [[String: Any]] = []
             target = normalizeTargetShape(target)
             args = normalizeArgsShape(args)
+            if opName == "moveBefore" || opName == "moveAfter" {
+                if opName == "moveBefore" {
+                    if args["beforeSlideKey"] == nil {
+                        if let ref = args["slideKey"] ?? args["before"] ?? args["referenceSlideKey"] ?? target["beforeSlideKey"] ?? target["before"] {
+                            args["beforeSlideKey"] = ref
+                        }
+                    }
+                } else {
+                    if args["afterSlideKey"] == nil {
+                        if let ref = args["slideKey"] ?? args["after"] ?? args["referenceSlideKey"] ?? target["afterSlideKey"] ?? target["after"] {
+                            args["afterSlideKey"] = ref
+                        }
+                    }
+                }
+                args.removeValue(forKey: "slideKey")
+                args.removeValue(forKey: "referenceSlideKey")
+                args.removeValue(forKey: "before")
+                args.removeValue(forKey: "after")
+                target.removeValue(forKey: "beforeSlideKey")
+                target.removeValue(forKey: "afterSlideKey")
+                target.removeValue(forKey: "before")
+                target.removeValue(forKey: "after")
+                opName = "moveSlide"
+            }
             liftTargetFieldsFromArgs(target: &target, args: &args)
             let plannerOriginalSlideKey = (target["slideKey"] as? String)?
                 .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1266,11 +1296,18 @@ final class LiveAutomationEngine: @unchecked Sendable {
                 target["slideKey"] = mappedSlideKey
             }
             if let concreteSlideKey = target["slideKey"] as? String {
+                let normalizedConcrete = normalizeDeicticSlideKey(concreteSlideKey)
+                let isKnownBoundSlide = knownBindings[concreteSlideKey] != nil || knownBindings[normalizedConcrete] != nil
+                let allowRebase = isKnownBoundSlide &&
+                    !createdSlideAliases.contains(concreteSlideKey) &&
+                    !createdSlideAliases.contains(normalizedConcrete) &&
+                    (slideIndexHint(from: concreteSlideKey).map { $0 <= maxContextSlideIndex } ?? false)
                 target["slideKey"] = SlideKeyRebaser.rebaseIfNeeded(
                     opName: opName,
                     slideKey: concreteSlideKey,
                     args: args,
-                    insertionIndices: plannedInsertions
+                    insertionIndices: plannedInsertions,
+                    allowRebase: allowRebase
                 )
             }
             let selectorAwareTarget = target
@@ -1317,13 +1354,18 @@ final class LiveAutomationEngine: @unchecked Sendable {
             }
 
             if needsSlideKey(opName), target["slideKey"] == nil,
-               let inferredSlideKey = inferSlideKey(opName: opName, target: target, args: args) {
+               let inferredSlideKey = inferSlideKey(
+                opName: opName,
+                target: target,
+                args: args,
+                knownBindings: knownBindings
+               ) {
                 target["slideKey"] = inferredSlideKey
             }
 
             if needsSlideKey(opName), target["slideKey"] == nil {
                 if let currentSlideIndex = knownBindings["current_slide"] {
-                    target["slideKey"] = "slide_\(currentSlideIndex)"
+                    target["slideKey"] = preferredSlideKey(for: currentSlideIndex, knownBindings: knownBindings)
                 } else {
                     target["slideKey"] = currentSlideKey ?? nextSlideKey(fromTitle: "slide")
                 }
@@ -1400,6 +1442,19 @@ final class LiveAutomationEngine: @unchecked Sendable {
                     args["masterName"] != nil
                 let forceBulletsLayout = effectiveSlideKey.map { bulletSlideKeys.contains($0) } ?? false
                 args = normalizeEnsureSlideArgs(args, forceTitleAndBullets: forceBulletsLayout)
+                if let slideKey = effectiveSlideKey,
+                   shouldAssignManagedAliasForCreatedSlide(
+                    slideKey: slideKey,
+                    createsNewSlide: shouldTreatEnsureSlideAsCreateIntent(args: args),
+                    knownBindings: knownBindings
+                   ) {
+                    let managedSlideKey = nextSlideKey(
+                        fromTitle: textValue(from: args["title"]) ?? "inserted_slide"
+                    )
+                    slideKeyRewrites[slideKey] = managedSlideKey
+                    target["slideKey"] = managedSlideKey
+                    effectiveSlideKey = managedSlideKey
+                }
                 if insertionObjective,
                    let slideKey = effectiveSlideKey,
                    shouldBindExistingSlideByTitleHint(
@@ -1489,6 +1544,18 @@ final class LiveAutomationEngine: @unchecked Sendable {
                 }
             }
 
+            if opName == "duplicateSlide",
+               let slideKey = target["slideKey"] as? String,
+               shouldAssignManagedAliasForCreatedSlide(
+                slideKey: slideKey,
+                createsNewSlide: true,
+                knownBindings: knownBindings
+               ) {
+                let managedSlideKey = nextSlideKey(fromTitle: "duplicated_slide")
+                slideKeyRewrites[slideKey] = managedSlideKey
+                target["slideKey"] = managedSlideKey
+            }
+
             if opName == "ensureTextBox", args["text"] == nil {
                 args["text"] = ""
             }
@@ -1519,7 +1586,11 @@ final class LiveAutomationEngine: @unchecked Sendable {
             }
 
             if opName == "moveSlide" {
-                args = normalizeMoveSlideArgs(args)
+                args = normalizeMoveSlideArgs(
+                    args,
+                    target: target,
+                    knownBindings: knownBindings
+                )
             }
 
             if opName == "setPresenterNotes" {
@@ -1640,6 +1711,10 @@ final class LiveAutomationEngine: @unchecked Sendable {
 
             if let slideKey = target["slideKey"] as? String {
                 if opName == "ensureSlide" {
+                    let normalizedSlideKey = normalizeDeicticSlideKey(slideKey)
+                    if knownBindings[slideKey] == nil && knownBindings[normalizedSlideKey] == nil {
+                        createdSlideAliases.insert(slideKey)
+                    }
                     if shouldTreatEnsureSlideAsInsert(
                         slideKey: slideKey,
                         args: args,
@@ -1651,6 +1726,10 @@ final class LiveAutomationEngine: @unchecked Sendable {
                     }
                     materializedSlideKeys.insert(slideKey)
                 } else if opName == "duplicateSlide" {
+                    let normalizedSlideKey = normalizeDeicticSlideKey(slideKey)
+                    if knownBindings[slideKey] == nil && knownBindings[normalizedSlideKey] == nil {
+                        createdSlideAliases.insert(slideKey)
+                    }
                     if !materializedSlideKeys.contains(slideKey),
                        let insertIndex = positiveInt(from: args["index"]) {
                         plannedInsertions.append(insertIndex)
@@ -1911,6 +1990,27 @@ final class LiveAutomationEngine: @unchecked Sendable {
         return false
     }
 
+    private func shouldAssignManagedAliasForCreatedSlide(
+        slideKey: String,
+        createsNewSlide: Bool,
+        knownBindings: [String: Int]
+    ) -> Bool {
+        _ = createsNewSlide
+        let cleaned = slideKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleaned.isEmpty else { return false }
+
+        let normalized = normalizeDeicticSlideKey(cleaned)
+        if isPlanAliasSlideKey(normalized) {
+            return false
+        }
+
+        if knownBindings[cleaned] != nil || knownBindings[normalized] != nil {
+            return false
+        }
+
+        return true
+    }
+
     private func sanitizeKnownBindings(
         _ raw: [String: Int],
         contextSlides: [ContextSlide]
@@ -1931,7 +2031,8 @@ final class LiveAutomationEngine: @unchecked Sendable {
                 sanitized[key] = index
                 continue
             }
-            if isConcreteSlideAlias(key), maxContextIndex == 0 || index <= maxContextIndex {
+            if (isConcreteSlideAlias(key) || isStableSlideAlias(key)),
+               maxContextIndex == 0 || index <= maxContextIndex {
                 sanitized[key] = index
             }
         }
@@ -1939,9 +2040,61 @@ final class LiveAutomationEngine: @unchecked Sendable {
         return sanitized
     }
 
+    private func plannerBindingsForCodex(
+        baseBindings: [String: Int],
+        contextSlides: [ContextSlide],
+        focus: PresentationFocusContext
+    ) -> [String: Int] {
+        var plannerBindings: [String: Int] = [:]
+
+        for (key, index) in baseBindings {
+            guard index > 0 else { continue }
+            if isPlannerSafeSlideAlias(key) {
+                plannerBindings[key] = index
+            }
+        }
+
+        for slide in contextSlides where isPlannerSafeSlideAlias(slide.slideKey) {
+            plannerBindings[slide.slideKey] = slide.index
+        }
+
+        if let currentSlideIndex = focus.currentSlideIndex {
+            plannerBindings["current_slide"] = currentSlideIndex
+            plannerBindings["this_slide"] = currentSlideIndex
+            plannerBindings["active_slide"] = currentSlideIndex
+            plannerBindings["slide_after_current"] = currentSlideIndex + 1
+            plannerBindings["slide_after_this"] = currentSlideIndex + 1
+        }
+
+        return plannerBindings
+    }
+
+    private func isPlannerSafeSlideAlias(_ key: String) -> Bool {
+        let normalized = key.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if normalized.isEmpty { return false }
+        if isReservedPlannerAlias(normalized) { return true }
+        if isStableSlideAlias(normalized) { return true }
+        if isConcreteSlideAlias(normalized) { return false }
+        return true
+    }
+
+    private func isReservedPlannerAlias(_ key: String) -> Bool {
+        switch key {
+        case "active_slide", "current_slide", "this_slide", "slide_after_current", "slide_after_this":
+            return true
+        default:
+            return false
+        }
+    }
+
     private func isConcreteSlideAlias(_ key: String) -> Bool {
         let lowered = key.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         return lowered.range(of: #"^slide_\d+$"#, options: .regularExpression) != nil
+    }
+
+    private func isStableSlideAlias(_ key: String) -> Bool {
+        let normalized = key.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return normalized.hasPrefix("sref_") || normalized.hasPrefix("sid_")
     }
 
     private func consumedTitleKey(slideKey: String, title: String) -> String {
@@ -1963,19 +2116,24 @@ final class LiveAutomationEngine: @unchecked Sendable {
         return false
     }
 
-    private func inferSlideKey(opName: String, target: [String: Any], args: [String: Any]) -> String? {
+    private func inferSlideKey(
+        opName: String,
+        target: [String: Any],
+        args: [String: Any],
+        knownBindings: [String: Int]
+    ) -> String? {
         if let slideIndex = positiveInt(from: target["slideIndex"]) {
-            return "slide_\(slideIndex)"
+            return preferredSlideKey(for: slideIndex, knownBindings: knownBindings)
         }
 
         if opName == "ensureSlide",
            let index = positiveInt(from: args["index"]) {
-            return "slide_\(index)"
+            return preferredSlideKey(for: index, knownBindings: knownBindings)
         }
 
         if opName == "moveSlide",
            let fromIndex = positiveInt(from: target["fromSlideIndex"] ?? args["fromIndex"]) {
-            return "slide_\(fromIndex)"
+            return preferredSlideKey(for: fromIndex, knownBindings: knownBindings)
         }
 
         return nil
@@ -1997,7 +2155,7 @@ final class LiveAutomationEngine: @unchecked Sendable {
         if let known = preferredKnownSlideKey(for: matched, knownBindings: knownBindings) {
             return known
         }
-        return "slide_\(matched.index)"
+        return preferredSlideKey(for: matched.index, knownBindings: knownBindings)
     }
 
     private func isSlideResolveTarget(opName: String, selector: [String: Any]) -> Bool {
@@ -2790,12 +2948,100 @@ final class LiveAutomationEngine: @unchecked Sendable {
         return normalized
     }
 
-    private func normalizeMoveSlideArgs(_ args: [String: Any]) -> [String: Any] {
+    private func normalizeMoveSlideArgs(
+        _ args: [String: Any],
+        target: [String: Any],
+        knownBindings: [String: Int]
+    ) -> [String: Any] {
         var normalized = args
-        if normalized["index"] == nil, let to = normalized["to"] {
-            normalized["index"] = to
-            normalized.removeValue(forKey: "to")
+        let nestedTo = normalized["to"] as? [String: Any]
+        func unwrapIndexValue(_ value: Any) -> Any? {
+            if let object = value as? [String: Any], let nested = object["index"] {
+                return nested
+            }
+            return value
         }
+        func slideKeyValue(from value: Any?) -> String? {
+            guard let value else { return nil }
+            if let text = value as? String {
+                let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                return trimmed.isEmpty ? nil : trimmed
+            }
+            if let object = value as? [String: Any] {
+                let orderedKeys = ["slideKey", "beforeSlideKey", "afterSlideKey", "key", "id"]
+                for key in orderedKeys {
+                    if let candidate = object[key] as? String {
+                        let trimmed = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if !trimmed.isEmpty {
+                            return trimmed
+                        }
+                    }
+                }
+            }
+            return nil
+        }
+        func resolvedIndex(for rawSlideKey: String?) -> Int? {
+            guard let rawSlideKey else { return nil }
+            let resolved = resolveSlideKeyAlias(rawSlideKey, knownBindings: knownBindings) ?? rawSlideKey
+            let normalizedKey = normalizeDeicticSlideKey(resolved)
+            if let direct = knownBindings[resolved], direct > 0 {
+                return direct
+            }
+            if let normalized = knownBindings[normalizedKey], normalized > 0 {
+                return normalized
+            }
+            if let hinted = slideIndexHint(from: resolved), hinted > 0 {
+                return hinted
+            }
+            return nil
+        }
+        let maxBoundIndex = knownBindings
+            .filter { key, value in
+                value > 0 && !isReservedPlannerAlias(key)
+            }
+            .map(\.value)
+            .max() ?? 1
+        if normalized["index"] == nil {
+            let aliases = ["to", "toIndex", "destinationIndex", "targetIndex"]
+            for alias in aliases {
+                if let value = normalized[alias] {
+                    normalized["index"] = unwrapIndexValue(value)
+                    break
+                }
+            }
+        }
+        normalized.removeValue(forKey: "to")
+        normalized.removeValue(forKey: "toIndex")
+        normalized.removeValue(forKey: "destinationIndex")
+        normalized.removeValue(forKey: "targetIndex")
+        if normalized["index"] == nil, let nested = nestedTo, let value = nested["index"] {
+            normalized["index"] = value
+        }
+        if normalized["index"] == nil {
+            let beforeKey =
+                slideKeyValue(from: normalized["beforeSlideKey"]) ??
+                slideKeyValue(from: normalized["before"]) ??
+                slideKeyValue(from: target["beforeSlideKey"]) ??
+                slideKeyValue(from: target["before"])
+            if let referenceIndex = resolvedIndex(for: beforeKey) {
+                normalized["index"] = referenceIndex
+            }
+        }
+        if normalized["index"] == nil {
+            let afterKey =
+                slideKeyValue(from: normalized["afterSlideKey"]) ??
+                slideKeyValue(from: normalized["after"]) ??
+                slideKeyValue(from: target["afterSlideKey"]) ??
+                slideKeyValue(from: target["after"])
+            if let referenceIndex = resolvedIndex(for: afterKey) {
+                let candidate = referenceIndex + 1
+                normalized["index"] = min(max(candidate, 1), maxBoundIndex)
+            }
+        }
+        normalized.removeValue(forKey: "beforeSlideKey")
+        normalized.removeValue(forKey: "afterSlideKey")
+        normalized.removeValue(forKey: "before")
+        normalized.removeValue(forKey: "after")
         return normalized
     }
 
@@ -2939,6 +3185,10 @@ final class LiveAutomationEngine: @unchecked Sendable {
             return "alignElements"
         case "distribute", "distributeObjects", "distributeItems":
             return "distributeElements"
+        case "move_before", "moveBefore", "moveSlideBefore":
+            return "moveBefore"
+        case "move_after", "moveAfter", "moveSlideAfter":
+            return "moveAfter"
         default:
             return trimmed
         }
@@ -3197,6 +3447,48 @@ final class LiveAutomationEngine: @unchecked Sendable {
             lowered.contains("persist")
     }
 
+    private func droppedDestructiveOps(from diagnostics: [String]) -> Set<String> {
+        var dropped = Set<String>()
+        for diagnostic in diagnostics {
+            guard diagnostic.contains("destructive action requires explicit confirmation") else {
+                continue
+            }
+            if let range = diagnostic.range(of: #"compiler dropped ([A-Za-z0-9_]+):"#, options: .regularExpression) {
+                let snippet = String(diagnostic[range])
+                let op = snippet
+                    .replacingOccurrences(of: "compiler dropped ", with: "")
+                    .replacingOccurrences(of: ":", with: "")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                if !op.isEmpty {
+                    dropped.insert(op)
+                }
+            }
+        }
+        return dropped
+    }
+
+    private func objectiveRequestsDestructiveChange(_ input: String) -> Bool {
+        let lowered = input.lowercased()
+        let destructiveVerbs = [
+            "delete",
+            "remove",
+            "reset",
+            "clear",
+            "wipe"
+        ]
+        let destructiveTargets = [
+            "slide",
+            "slides",
+            "deck",
+            "presentation",
+            "object",
+            "element"
+        ]
+        let hasVerb = destructiveVerbs.contains { lowered.contains($0) }
+        let hasTarget = destructiveTargets.contains { lowered.contains($0) }
+        return hasVerb && hasTarget
+    }
+
     private func normalizeDeicticSlideKey(_ raw: String) -> String {
         let token = raw
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -3219,20 +3511,20 @@ final class LiveAutomationEngine: @unchecked Sendable {
         guard !alias.isEmpty else { return nil }
 
         if let directIndex = knownBindings[alias] {
-            return "slide_\(directIndex)"
+            return preferredSlideKey(for: directIndex, knownBindings: knownBindings)
         }
 
         let normalized = normalizeDeicticSlideKey(alias)
         if let normalizedIndex = knownBindings[normalized] {
-            return "slide_\(normalizedIndex)"
+            return preferredSlideKey(for: normalizedIndex, knownBindings: knownBindings)
         }
 
         if let hinted = slideIndexHint(from: alias) {
-            return "slide_\(hinted)"
+            return preferredSlideKey(for: hinted, knownBindings: knownBindings)
         }
 
         if let hinted = slideIndexHint(from: normalized) {
-            return "slide_\(hinted)"
+            return preferredSlideKey(for: hinted, knownBindings: knownBindings)
         }
 
         return normalized
@@ -3295,18 +3587,39 @@ final class LiveAutomationEngine: @unchecked Sendable {
         let normalized = normalizeDeicticSlideKey(key)
         if isPlanAliasSlideKey(normalized),
            let index = knownBindings[normalized] ?? knownBindings[key] {
-            return "slide_\(index)"
+            return preferredSlideKey(for: index, knownBindings: knownBindings)
         }
 
-        if knownBindings[key] != nil {
+        if let keyIndex = knownBindings[key] {
+            if isConcreteSlideAlias(key) {
+                return preferredSlideKey(for: keyIndex, knownBindings: knownBindings)
+            }
             return key
         }
 
         if let index = knownBindings[normalized] {
-            return "slide_\(index)"
+            return preferredSlideKey(for: index, knownBindings: knownBindings)
         }
 
         return key
+    }
+
+    private func preferredSlideKey(for index: Int, knownBindings: [String: Int]) -> String {
+        guard index > 0 else { return "slide_1" }
+        let candidates = knownBindings
+            .filter { key, value in
+                value == index && !isReservedPlannerAlias(key)
+            }
+            .map(\.key)
+            .sorted()
+
+        if let stable = candidates.first(where: { isStableSlideAlias($0) }) {
+            return stable
+        }
+        if let nonConcrete = candidates.first(where: { !isConcreteSlideAlias($0) }) {
+            return nonConcrete
+        }
+        return "slide_\(index)"
     }
 
     private func hasEquivalentAssert(alreadyIn operations: [[String: Any]], candidate: [String: Any]) -> Bool {

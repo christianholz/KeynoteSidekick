@@ -274,7 +274,14 @@ private func decodePayload(
         return .hideSlide(slideKey: slideKey, hidden: hidden)
     case .moveSlide:
         let slideKey = try target.requiredString("slideKey", context: "moveSlide.target")
-        guard let index = args.optionalInt("index"), index > 0 else {
+        let index =
+            args.optionalInt("index") ??
+            args.optionalInt("toIndex") ??
+            args.optionalInt("destinationIndex") ??
+            args.optionalInt("targetIndex") ??
+            args.optionalInt("to") ??
+            args["to"]?.objectValue?["index"]?.intValue
+        guard let index, index > 0 else {
             throw ValidationError(message: "moveSlide.args.index must be a positive integer")
         }
         return .moveSlide(slideKey: slideKey, index: index)

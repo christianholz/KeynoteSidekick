@@ -10,6 +10,9 @@ struct PlanningScopeGuardTests {
 
         let promptB = "add 5 slides, each with a limerick"
         #expect(PlanningScopeGuard.explicitSlideBudget(objective: promptB) == 5)
+
+        let promptC = "create a 10-slide presentation on the cardiovascular system"
+        #expect(PlanningScopeGuard.explicitSlideBudget(objective: promptC) == 10)
     }
 
     @Test("Infers touched-slide budget and disables it for explicit mass scope")
@@ -20,8 +23,11 @@ struct PlanningScopeGuardTests {
         let promptB = "add 5 slides, each with a limerick"
         #expect(PlanningScopeGuard.touchedSlideBudget(objective: promptB) == 9)
 
-        let promptC = "retitle all slides to include the quarter"
-        #expect(PlanningScopeGuard.touchedSlideBudget(objective: promptC) == nil)
+        let promptC = "create a 10-slide presentation on the cardiovascular system"
+        #expect(PlanningScopeGuard.touchedSlideBudget(objective: promptC) == 14)
+
+        let promptD = "retitle all slides to include the quarter"
+        #expect(PlanningScopeGuard.touchedSlideBudget(objective: promptD) == nil)
     }
 
     @Test("Counts only true new slide creations")

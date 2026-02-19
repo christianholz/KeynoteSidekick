@@ -24,4 +24,27 @@ struct SlideKeyRebaserTests {
         )
         #expect(rebased == "slide_2")
     }
+
+    @Test("Does not rebase structural ensureSlide create when layoutName is used")
+    func noRebaseForLayoutNameEnsureSlide() {
+        let rebased = SlideKeyRebaser.rebaseIfNeeded(
+            opName: "ensureSlide",
+            slideKey: "slide_2",
+            args: ["layoutName": "Title & Bullets"],
+            insertionIndices: [2]
+        )
+        #expect(rebased == "slide_2")
+    }
+
+    @Test("Does not rebase when caller disallows rebasing")
+    func noRebaseWhenDisabled() {
+        let rebased = SlideKeyRebaser.rebaseIfNeeded(
+            opName: "ensureBullets",
+            slideKey: "slide_2",
+            args: [:],
+            insertionIndices: [2],
+            allowRebase: false
+        )
+        #expect(rebased == "slide_2")
+    }
 }

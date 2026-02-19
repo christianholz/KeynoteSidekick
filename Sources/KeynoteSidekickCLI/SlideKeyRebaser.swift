@@ -5,8 +5,10 @@ enum SlideKeyRebaser {
         opName: String,
         slideKey: String,
         args: [String: Any],
-        insertionIndices: [Int]
+        insertionIndices: [Int],
+        allowRebase: Bool = true
     ) -> String {
+        guard allowRebase else { return slideKey }
         guard !insertionIndices.isEmpty else { return slideKey }
         guard let originalIndex = slideIndexHint(from: slideKey) else { return slideKey }
 
@@ -24,7 +26,7 @@ enum SlideKeyRebaser {
     }
 
     private static func hasStructuralCreationIntent(args: [String: Any]) -> Bool {
-        args["layout"] != nil || args["master"] != nil || args["masterName"] != nil
+        args["layout"] != nil || args["layoutName"] != nil || args["master"] != nil || args["masterName"] != nil
     }
 
     private static func slideIndexHint(from slideKey: String) -> Int? {

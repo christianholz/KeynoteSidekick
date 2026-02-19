@@ -34,6 +34,7 @@ public final class AppleScriptKeynoteAdapter: KeynoteAutomationAdapter {
         let openedPath = try runAppleScript(script)
         state.presentationPath = openedPath.isEmpty ? path : openedPath
         loadState()
+        try resyncSlideBindingsFromDeck()
     }
 
     public func attachToFrontPresentation() throws {
@@ -63,10 +64,12 @@ public final class AppleScriptKeynoteAdapter: KeynoteAutomationAdapter {
         if path.isEmpty {
             state = AdapterState.empty
             tombstonedSlideKeys.removeAll()
+            try resyncSlideBindingsFromDeck()
             return
         }
         state.presentationPath = path
         loadState()
+        try resyncSlideBindingsFromDeck()
     }
 
     public func savePresentation() throws {
@@ -204,13 +207,11 @@ public final class AppleScriptKeynoteAdapter: KeynoteAutomationAdapter {
         }
         state.slideIndices[slideKey] = slideIndex
         tombstonedSlideKeys.remove(slideKey)
-        persistState()
+        try resyncSlideBindingsFromDeck()
     }
 
     public func duplicateSlide(fromSlideKey: String, slideKey: String, index: Int?, title: String?) throws {
-        guard let fromIndex = state.slideIndices[fromSlideKey] else {
-            throw AdapterError(code: "MISSING_SLIDE", message: "fromSlideKey \(fromSlideKey) is unknown")
-        }
+        let fromIndex = try requireSlideIndex(fromSlideKey)
         let requestedIndex = index ?? -1
         let hasTitle = !(title ?? "").isEmpty
 
@@ -248,7 +249,7 @@ public final class AppleScriptKeynoteAdapter: KeynoteAutomationAdapter {
         remapSlideBindingsForInsertion(at: slideIndex)
         state.slideIndices[slideKey] = slideIndex
         tombstonedSlideKeys.remove(slideKey)
-        persistState()
+        try resyncSlideBindingsFromDeck()
     }
 
     public func deleteSlide(slideKey: String) throws {
@@ -269,7 +270,7 @@ public final class AppleScriptKeynoteAdapter: KeynoteAutomationAdapter {
         let removedKeys = removeSlideBindings(at: index)
         tombstonedSlideKeys.formUnion(removedKeys)
         tombstonedSlideKeys.insert(slideKey)
-        persistState()
+        try resyncSlideBindingsFromDeck()
     }
 
     public func hideSlide(slideKey: String, hidden: Bool) throws {
@@ -323,7 +324,7 @@ public final class AppleScriptKeynoteAdapter: KeynoteAutomationAdapter {
             throw AdapterError(code: "PARSE_ERROR", message: "Unable to parse destination slide index after move")
         }
         remapSlideBindingsForMove(fromIndex: fromIndex, toIndex: toIndex)
-        persistState()
+        try resyncSlideBindingsFromDeck()
     }
 
     public func ensureTextBox(slideKey: String, elementName: String, text: String, frame: Frame?, role: String?) throws {
@@ -867,7 +868,17 @@ public final class AppleScriptKeynoteAdapter: KeynoteAutomationAdapter {
 
     public func slideExists(slideKey: String) throws -> Bool {
         if tombstonedSlideKeys.contains(slideKey) {
-            return false
+            try? resyncSlideBindingsFromDeck()
+            if state.slideIndices[slideKey] != nil {
+                tombstonedSlideKeys.remove(slideKey)
+                persistState()
+            } else {
+                return false
+            }
+        }
+
+        if state.slideIndices[slideKey] == nil {
+            try? resyncSlideBindingsFromDeck()
         }
 
         if let index = state.slideIndices[slideKey] {
@@ -991,66 +1002,14 @@ public final class AppleScriptKeynoteAdapter: KeynoteAutomationAdapter {
     }
 
     public func knownSlideBindings() throws -> [String: Int] {
-        state.slideIndices
+        if try isPresentationOpen() {
+            try resyncSlideBindingsFromDeck()
+        }
+        return state.slideIndices
     }
 
     public func refreshSlideBindings() throws -> [String: Int] {
-        guard try isPresentationOpen() else {
-            return state.slideIndices
-        }
-
-        let totalSlides = try slideCount()
-        var changed = false
-
-        if totalSlides <= 0 {
-            if !state.slideIndices.isEmpty || !state.elementAliases.isEmpty {
-                state.slideIndices.removeAll()
-                state.elementAliases.removeAll()
-                changed = true
-            }
-        } else {
-            for key in Array(state.slideIndices.keys) {
-                guard let boundIndex = state.slideIndices[key] else { continue }
-                if let hinted = hintedSlideIndex(from: key) {
-                    if hinted >= 1, hinted <= totalSlides {
-                        if state.slideIndices[key] != hinted {
-                            state.slideIndices[key] = hinted
-                            changed = true
-                        }
-                        tombstonedSlideKeys.remove(key)
-                    } else {
-                        state.slideIndices.removeValue(forKey: key)
-                        state.elementAliases.removeValue(forKey: key)
-                        tombstonedSlideKeys.insert(key)
-                        changed = true
-                    }
-                    continue
-                }
-                if boundIndex >= 1, boundIndex <= totalSlides {
-                    tombstonedSlideKeys.remove(key)
-                    continue
-                }
-
-                if let hinted = hintedSlideIndex(from: key), hinted >= 1, hinted <= totalSlides {
-                    if state.slideIndices[key] != hinted {
-                        state.slideIndices[key] = hinted
-                        changed = true
-                    }
-                    tombstonedSlideKeys.remove(key)
-                    continue
-                }
-
-                state.slideIndices.removeValue(forKey: key)
-                state.elementAliases.removeValue(forKey: key)
-                tombstonedSlideKeys.insert(key)
-                changed = true
-            }
-        }
-
-        if changed {
-            persistState()
-        }
-
+        try resyncSlideBindingsFromDeck()
         return state.slideIndices
     }
 
@@ -1861,6 +1820,9 @@ public final class AppleScriptKeynoteAdapter: KeynoteAutomationAdapter {
     }
 
     private func requireSlideIndex(_ slideKey: String) throws -> Int {
+        if state.slideIndices[slideKey] == nil {
+            try? resyncSlideBindingsFromDeck()
+        }
         if let hintedIndex = hintedSlideIndex(from: slideKey), try slideExists(at: hintedIndex) {
             if state.slideIndices[slideKey] != hintedIndex || tombstonedSlideKeys.contains(slideKey) {
                 state.slideIndices[slideKey] = hintedIndex
@@ -2030,6 +1992,110 @@ public final class AppleScriptKeynoteAdapter: KeynoteAutomationAdapter {
 
     private func isConcreteSlideAlias(_ key: String) -> Bool {
         hintedSlideIndex(from: key) != nil
+    }
+
+    private func isStableSlideAlias(_ key: String) -> Bool {
+        let normalized = key.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return normalized.hasPrefix("sref_") || normalized.hasPrefix("sid_")
+    }
+
+    private func stableTextHash(_ text: String) -> String {
+        let bytes = [UInt8](text.utf8)
+        var hash: UInt64 = 0xcbf29ce484222325
+        let prime: UInt64 = 0x100000001b3
+        for byte in bytes {
+            hash ^= UInt64(byte)
+            hash = hash &* prime
+        }
+        return String(format: "%016llx", hash)
+    }
+
+    private func stableAlias(forPersistentId persistentId: String?, index: Int) -> String {
+        let trimmed = (persistentId ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let seed = trimmed.isEmpty ? "fallback:index:\(index)" : "persistent:\(trimmed)"
+        return "sref_\(stableTextHash(seed))"
+    }
+
+    private func fetchSlideIdentityRows() throws -> [(index: Int, stableAlias: String?)] {
+        let script = """
+        tell application "Keynote"
+          if (count of documents) is 0 then error "No open presentation"
+          set d to front document
+          set sep to ASCII character 31
+          set outLines to {}
+          set totalSlides to count of slides of d
+          repeat with i from 1 to totalSlides
+            set s to slide i of d
+            set sid to ""
+            try
+              set sid to (id of s as text)
+            end try
+            set end of outLines to (i as text) & sep & sid
+          end repeat
+          set AppleScript's text item delimiters to linefeed
+          set payload to outLines as text
+          set AppleScript's text item delimiters to ""
+          return payload
+        end tell
+        """
+        let raw = try runAppleScript(script)
+        if raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return []
+        }
+        let sep = Character(UnicodeScalar(31)!)
+        return raw
+            .split(separator: "\n", omittingEmptySubsequences: true)
+            .compactMap { line -> (index: Int, stableAlias: String?)? in
+                let parts = line.split(separator: sep, omittingEmptySubsequences: false).map(String.init)
+                guard let indexPart = parts.first,
+                      let index = Int(indexPart.trimmingCharacters(in: .whitespacesAndNewlines)),
+                      index > 0 else {
+                    return nil
+                }
+                let sid = parts.count > 1 ? parts[1] : ""
+                return (index: index, stableAlias: stableAlias(forPersistentId: sid, index: index))
+            }
+    }
+
+    private func resyncSlideBindingsFromDeck() throws {
+        guard try isPresentationOpen() else { return }
+        let rows = try fetchSlideIdentityRows()
+        let totalSlides = rows.count
+        var next: [String: Int] = [:]
+        var changed = false
+
+        let preservedAliases = state.slideIndices
+            .filter { key, _ in
+                !isConcreteSlideAlias(key) && !isStableSlideAlias(key)
+            }
+
+        for (index, stableAlias) in rows {
+            next["slide_\(index)"] = index
+            if let stableAlias {
+                next[stableAlias] = index
+                tombstonedSlideKeys.remove(stableAlias)
+            }
+        }
+
+        for (alias, oldIndex) in preservedAliases {
+            if oldIndex >= 1, oldIndex <= totalSlides {
+                next[alias] = oldIndex
+                tombstonedSlideKeys.remove(alias)
+            } else {
+                state.elementAliases.removeValue(forKey: alias)
+                tombstonedSlideKeys.insert(alias)
+                changed = true
+            }
+        }
+
+        if next != state.slideIndices {
+            state.slideIndices = next
+            changed = true
+        }
+
+        if changed {
+            persistState()
+        }
     }
 
     private func stateFilePath() -> URL? {

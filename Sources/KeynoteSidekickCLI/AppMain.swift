@@ -33,6 +33,9 @@ private final class StartupLogger {
 @MainActor
 final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var window: NSWindow?
+    private var floatToggleButton: NSButton?
+    private var floatToggleContainer: NSView?
+    private var isFloatAtopEnabled = true
     private let logger = StartupLogger.shared
 
     func configureAndShowWindow() {
@@ -48,8 +51,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
 
         positionWindowOnRight(window)
-        window.level = .floating
-        window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        applyFloatAtopState(for: window)
+        updateFloatTogglePosition(for: window)
         window.isReleasedWhenClosed = false
         window.hidesOnDeactivate = false
         window.makeKeyAndOrderFront(nil)
@@ -96,21 +99,131 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate {
         NSApp.terminate(nil)
     }
 
+    func windowDidResize(_ notification: Notification) {
+        guard let window else { return }
+        updateFloatTogglePosition(for: window)
+    }
+
     private func buildWindow() -> NSWindow {
         let frame = defaultFrame()
 
         let window = NSWindow(
             contentRect: frame,
-            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            styleMask: [.titled, .closable, .resizable, .fullSizeContentView],
             backing: .buffered,
             defer: false
         )
 
-        window.title = "Keynote Sidekick"
+        window.title = "KeynoteSidekick"
+        window.titleVisibility = .visible
+        window.titlebarAppearsTransparent = true
+        window.isMovableByWindowBackground = true
+        window.backgroundColor = NSColor(
+            calibratedRed: 0.20,
+            green: 0.23,
+            blue: 0.27,
+            alpha: 1.0
+        )
+        if #available(macOS 11.0, *) {
+            window.toolbarStyle = .unifiedCompact
+        }
         window.tabbingMode = .disallowed
+        configureTrafficLights(for: window)
+        installFloatAtopToggle(on: window)
         window.contentViewController = NSHostingController(rootView: ChatPanelView())
 
         return window
+    }
+
+    private func configureTrafficLights(for window: NSWindow) {
+        if let minimizeButton = window.standardWindowButton(.miniaturizeButton) {
+            minimizeButton.isEnabled = false
+            minimizeButton.isHidden = true
+        }
+        if let zoomButton = window.standardWindowButton(.zoomButton) {
+            zoomButton.isEnabled = false
+            zoomButton.isHidden = true
+        }
+    }
+
+    private func installFloatAtopToggle(on window: NSWindow) {
+        floatToggleButton?.removeFromSuperview()
+        floatToggleContainer?.removeFromSuperview()
+
+        let checkbox = NSButton(checkboxWithTitle: "", target: self, action: #selector(floatToggleChanged(_:)))
+        checkbox.controlSize = .small
+        checkbox.state = isFloatAtopEnabled ? .on : .off
+        checkbox.bezelStyle = .regularSquare
+        checkbox.sizeToFit()
+
+        let label = NSTextField(labelWithString: "float atop")
+        label.font = .systemFont(ofSize: 11, weight: .light)
+        label.textColor = .secondaryLabelColor
+        label.backgroundColor = .clear
+        label.sizeToFit()
+
+        let container = NSView(frame: .zero)
+        container.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(checkbox)
+        container.addSubview(label)
+        let spacing: CGFloat = 6
+        let checkboxXOffset: CGFloat = 2
+        let contentHeight = max(checkbox.fittingSize.height, label.fittingSize.height)
+        checkbox.frame = NSRect(
+            x: checkboxXOffset,
+            y: (contentHeight - checkbox.fittingSize.height) / 2.0,
+            width: checkbox.fittingSize.width,
+            height: checkbox.fittingSize.height
+        )
+        label.frame = NSRect(
+            x: checkbox.fittingSize.width + spacing,
+            y: (contentHeight - label.fittingSize.height) / 2.0,
+            width: label.fittingSize.width,
+            height: label.fittingSize.height
+        )
+        container.frame = NSRect(x: 0, y: 0, width: label.frame.maxX, height: contentHeight)
+
+        if let closeButton = window.standardWindowButton(.closeButton),
+           let titlebarView = closeButton.superview {
+            titlebarView.addSubview(container)
+        }
+        floatToggleButton = checkbox
+        floatToggleContainer = container
+        updateFloatTogglePosition(for: window)
+    }
+
+    private func updateFloatTogglePosition(for window: NSWindow) {
+        guard let container = floatToggleContainer,
+              let closeButton = window.standardWindowButton(.closeButton),
+              container.superview != nil else { return }
+
+        let size = container.frame.size
+        let x = closeButton.frame.maxX + 6
+        let y = closeButton.frame.midY - (size.height / 2.0)
+        container.frame = NSRect(x: x, y: y, width: size.width, height: size.height)
+    }
+
+    private func applyFloatAtopState(for window: NSWindow) {
+        if isFloatAtopEnabled {
+            window.level = .floating
+            window.collectionBehavior.insert(.canJoinAllSpaces)
+            window.collectionBehavior.insert(.fullScreenAuxiliary)
+        } else {
+            window.level = .normal
+            window.collectionBehavior.remove(.canJoinAllSpaces)
+            window.collectionBehavior.remove(.fullScreenAuxiliary)
+        }
+        floatToggleButton?.state = isFloatAtopEnabled ? .on : .off
+    }
+
+    @objc
+    private func floatToggleChanged(_ sender: NSButton) {
+        isFloatAtopEnabled = (sender.state == .on)
+        guard let window else { return }
+        applyFloatAtopState(for: window)
+        if isFloatAtopEnabled {
+            window.orderFrontRegardless()
+        }
     }
 
     private func positionWindowOnRight(_ window: NSWindow) {
